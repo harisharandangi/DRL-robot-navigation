@@ -1,0 +1,8 @@
+prefix=/home/harry/workspaces/td_ws/DRL-robot-navigation/catkin_ws/devel
+
+Name: multi_robot_scenario
+Description: Description of multi_robot_scenario
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 

@@ -1,0 +1,46 @@
+export GAZEBO_MODEL_PATH=$GAZEBO_MODEL_PATH:/home/harry/workspaces/td_ws/DRL-robot-navigation/catkin_ws/src/multi_robot_scenario/map
+
+
+
+for deleting earlier saved trained data
+rm -rf ~/workspaces/td_ws/DRL-robot-navigation/TD3/pytorch_models/*
+rm -rf ~/workspaces/td_ws/DRL-robot-navigation/TD3/results/*
+
+
+
+///////////////////////////////////////////////////////////////////////////////////
+You need to tell the code: "I have no model, please create a new one."
+
+Open train_velodyne_td3.py.
+
+Find Line 173 (approx).
+
+Set load_model to False.
+
+Python
+
+save_model = True   # Keep this True!
+load_model = False  # <--- FALSE means "Start from scratch"
+Run the training:
+
+Bash
+
+python3 train_velodyne_td3.py
+Let it run for your 1 - 2 hours.
+
+Note: The code saves automatically every ~10-15 minutes (5000 steps).
+
+When you are done, press Ctrl + C to stop it.
+
+Step 3: How to Resume Later (Phase 2)
+This is the most critical step. When you come back tomorrow (or after your break), you must tell the code: "Don't create a new brain; load the one I saved earlier."
+
+Open train_velodyne_td3.py again.
+
+Change Line 173 to True.
+
+Python
+
+save_model = True   # Keep True
+load_model = True   # <--- TRUE means "Continue where I left off"
+/////////////////////////////////////////////////////////////////////////////////////

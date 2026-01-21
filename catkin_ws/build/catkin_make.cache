@@ -1,0 +1,2 @@
+multi_robot_scenario:turtlebot3/turtlebot3:turtlebot3/turtlebot3_bringup:turtlebot3/turtlebot3_description:velodyne_simulator/velodyne_description:velodyne_simulator/velodyne_gazebo_plugins:velodyne_simulator/velodyne_simulator
+-DCATKIN_DEVEL_PREFIX=/home/harry/workspaces/td_ws/DRL-robot-navigation/catkin_ws/devel -DCMAKE_INSTALL_PREFIX=/home/harry/workspaces/td_ws/DRL-robot-navigation/catkin_ws/install -G Unix Makefiles
