@@ -46,11 +46,10 @@ class GazeboEnv:
         self.lower = -5.0
         self.velodyne_data = np.ones(self.environment_dim) * MAX_TRAINING_RANGE
         self.last_odom = None
-
-        # --- IDLE TRACKING VARIABLES ---
-        self.prev_x = 0
-        self.prev_y = 0
-        self.idle_counter = 0  # Counts how many steps we haven't moved
+        
+        # --- NEW: TRACKING FOR REWARD SHAPING ---
+        self.last_distance = 0.0 
+        self.idle_counter = 0
 
         self.set_self_state = ModelState()
         self.set_self_state.model_name = "turtlebot3_burger"
@@ -123,7 +122,7 @@ class GazeboEnv:
     def step(self, action):
         target = False
 
-        # --- SPEED SCALER ---
+        # --- AGGRESSIVE SPEED ---
         vel_cmd = Twist()
         vel_cmd.linear.x = action[0] * 0.5 
         vel_cmd.angular.z = action[1]
@@ -149,31 +148,11 @@ class GazeboEnv:
 
         done, collision, min_laser = self.observe_collision(self.velodyne_data)
         
-        # --- 1. OUT OF BOUNDS CHECK ---
+        # --- 1. OUT OF BOUNDS KILL ---
         if self.odom_x > 5.0 or self.odom_x < -5.0 or self.odom_y > 5.0 or self.odom_y < -5.0:
             done = True
             collision = True 
             print("OUT OF BOUNDS! Resetting...")
-
-        # --- 2. IDLE/SPINNING DEATH CHECK ---
-        # Calculate distance moved since last step
-        dist_moved = np.linalg.norm(
-            [self.odom_x - self.prev_x, self.odom_y - self.prev_y]
-        )
-        self.prev_x = self.odom_x
-        self.prev_y = self.odom_y
-
-        # If we moved less than 0.02m (basically spinning or stopped), count it
-        if dist_moved < 0.02:
-            self.idle_counter += 1
-        else:
-            self.idle_counter = 0 # Reset if we moved
-
-        # If we haven't moved effectively for 50 steps (5 seconds), KILL THE ROBOT
-        if self.idle_counter > 50:
-            print("ROBOT IS IDLE/SPINNING! Killing episode...")
-            done = True
-            collision = True # Treat as a crash to give -100 penalty
 
         v_state = []
         v_state[:] = self.velodyne_data[:]
@@ -193,6 +172,19 @@ class GazeboEnv:
         distance = np.linalg.norm(
             [self.odom_x - self.goal_x, self.odom_y - self.goal_y]
         )
+
+        # --- 2. KILL IF SPINNING/IDLE ---
+        # If linear speed is low but angular is high (spinning in place)
+        # OR if strictly not moving.
+        if action[0] < 0.05: # Barely moving forward
+            self.idle_counter += 1
+        else:
+            self.idle_counter = 0
+            
+        if self.idle_counter > 20: # 2 seconds of doing nothing/spinning
+            print("LAZY ROBOT! Killing episode...")
+            done = True
+            collision = True # Penalize as crash
 
         skew_x = self.goal_x - self.odom_x
         skew_y = self.goal_y - self.odom_y
@@ -220,8 +212,10 @@ class GazeboEnv:
         robot_state = [distance, theta, action[0], action[1]]
         state = np.append(laser_state, robot_state)
         
-        # Calculate Reward
-        reward = self.get_reward(target, collision, action, min_laser, distance)
+        # --- 3. CALCULATE BOLD REWARD ---
+        reward = self.get_reward(target, collision, action, min_laser, distance, self.last_distance)
+        self.last_distance = distance # Update for next step
+        
         return state, reward, done, target
 
     def reset(self):
@@ -230,11 +224,6 @@ class GazeboEnv:
             self.reset_proxy()
         except rospy.ServiceException as e:
             print("/gazebo/reset_simulation service call failed")
-
-        # Reset Idle Counter
-        self.idle_counter = 0
-        self.prev_x = 0
-        self.prev_y = 0
 
         angle = np.random.uniform(-np.pi, np.pi)
         quaternion = Quaternion.from_euler(0.0, 0.0, angle)
@@ -282,10 +271,7 @@ class GazeboEnv:
         distance = np.linalg.norm(
             [self.odom_x - self.goal_x, self.odom_y - self.goal_y]
         )
-
-        # Init tracking variables
-        self.prev_x = self.odom_x
-        self.prev_y = self.odom_y
+        self.last_distance = distance # Initialize distance tracking
 
         skew_x = self.goal_x - self.odom_x
         skew_y = self.goal_y - self.odom_y
@@ -394,17 +380,21 @@ class GazeboEnv:
         return False, False, min_laser
 
     @staticmethod
-    def get_reward(target, collision, action, min_laser, distance):
+    def get_reward(target, collision, action, min_laser, distance, last_distance):
         if target:
-            return 100.0
+            return 200.0 # BOLD REWARD FOR WINNING
         elif collision:
             return -100.0
         else:
-            r3 = lambda x: 1 - x if x < 1 else 0.0
+            # HOT/COLD GAME LOGIC:
+            # Calculate how much closer we got (positive means good)
+            distance_rate = last_distance - distance
             
-            # --- AGGRESSIVE REWARD ---
-            # 1. Action[0] (Linear): Reward speed
-            # 2. Action[1] (Angular): Punish spinning HARD
-            # 3. Distance: Extra reward for being closer to goal (helps "guide" the robot)
+            # Multiplier: 400x reward for every meter gained. 
+            # If robot moves 0.1m closer, it gets +4 points.
+            reward = distance_rate * 400.0 
             
-            return action[0] * 5.0 - abs(action[1]) * 5.0 - r3(min_laser) / 2
+            # Small penalty for time passing, to encourage speed
+            reward -= 0.05
+            
+            return reward

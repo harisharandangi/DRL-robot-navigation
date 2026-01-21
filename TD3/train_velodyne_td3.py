@@ -237,9 +237,7 @@ policy_freq = 2  # Frequency of Actor network updates
 buffer_size = 1e6  # Maximum size of the buffer
 file_name = "TD3_velodyne"  # name of the file to store the policy
 save_model = True  # Weather to save the model or not
-
-# IMPORTANT: SET TO TRUE TO KEEP YOUR 4 HOURS OF TRAINING
-load_model = True  # Weather to load a stored model
+load_model = True  # Keep TRUE to keep your progress
 
 random_near_obstacle = True  # To take random actions near obstacles or not
 
@@ -253,8 +251,9 @@ if save_model and not os.path.exists("./pytorch_models"):
 environment_dim = 20
 robot_dim = 4
 
-# Use your custom launch file
-env = GazeboEnv("mylaunch.launch", environment_dim)
+# Use custom launch
+#env = GazeboEnv("mylaunch.launch", environment_dim)
+env = GazeboEnv("empty_training.launch", environment_dim) # <--- USE THE NEW FILE
 
 time.sleep(5)
 torch.manual_seed(seed)
@@ -270,7 +269,7 @@ replay_buffer = ReplayBuffer(buffer_size, seed)
 if load_model:
     try:
         network.load(file_name, "./pytorch_models")
-        print("Successfully loaded existing model! Resuming training...")
+        print("Successfully loaded model!")
     except:
         print(
             "Could not load the stored model parameters, initializing training with random parameters"
@@ -331,14 +330,7 @@ while timestep < max_timesteps:
         -max_action, max_action
     )
 
-    # --- ANTI-SPIN BIAS ---
-    # If the robot is barely moving forward (action[0] < 0.1), force a "Forward" action occasionally.
-    # This prevents the robot from getting stuck in a spinning loop.
-    if action[0] < 0.1 and np.random.uniform(0, 1) < 0.2:
-        action[0] = np.random.uniform(0.5, 1.0) # Force forward
-        action[1] = 0.0 # Stop turning
-
-    # If the robot is facing an obstacle, randomly force it to take a consistent random action.
+    # --- BOLD EXPLORATION LOGIC ---
     if random_near_obstacle:
         if (
             np.random.uniform(0, 1) > 0.85
@@ -346,12 +338,16 @@ while timestep < max_timesteps:
             and count_rand_actions < 1
         ):
             count_rand_actions = np.random.randint(8, 15)
-            random_action = np.random.uniform(-1, 1, 2)
+            
+            # FORCE FORWARD BIAS
+            # Old: Random linear, Random Angular
+            # New: Always High Linear (0.5 to 1.0), Random Angular
+            random_action = [np.random.uniform(0.5, 1.0), np.random.uniform(-1, 1)]
 
         if count_rand_actions > 0:
             count_rand_actions -= 1
             action = random_action
-            action[0] = -1
+            # DO NOT override action[0] to -1 anymore. We want boldness.
 
     # Update action to fall in range [0,1] for linear velocity and [-1,1] for angular velocity
     a_in = [(action[0] + 1) / 2, action[1]]
