@@ -16,41 +16,15 @@ from std_srvs.srv import Empty
 from visualization_msgs.msg import Marker
 from visualization_msgs.msg import MarkerArray
 
+# --- CONSTANTS ---
 GOAL_REACHED_DIST = 0.3
 COLLISION_DIST = 0.35
 TIME_DELTA = 0.1
 
-# LDS-02 Settings
+# LDS-01/02 Settings (2D Lidar)
 ENVIRONMENT_DIM = 20
 MAX_TRAINING_RANGE = 10.0
 REAL_SENSOR_MAX = 3.5
-
-def check_pos(x, y):
-    goal_ok = True
-    if -3.8 > x > -6.2 and 6.2 > y > 3.8:
-        goal_ok = False
-    if -1.3 > x > -2.7 and 4.7 > y > -0.2:
-        goal_ok = False
-    if -0.3 > x > -4.2 and 2.7 > y > 1.3:
-        goal_ok = False
-    if -0.8 > x > -4.2 and -2.3 > y > -4.2:
-        goal_ok = False
-    if -1.3 > x > -3.7 and -0.8 > y > -2.7:
-        goal_ok = False
-    if 4.2 > x > 0.8 and -1.8 > y > -3.2:
-        goal_ok = False
-    if 4 > x > 2.5 and 0.7 > y > -3.2:
-        goal_ok = False
-    if 6.2 > x > 3.8 and -3.3 > y > -4.2:
-        goal_ok = False
-    if 4.2 > x > 1.3 and 3.7 > y > 1.5:
-        goal_ok = False
-    if -3.0 > x > -7.2 and 0.5 > y > -1.5:
-        goal_ok = False
-    if x > 4.5 or x < -4.5 or y > 4.5 or y < -4.5:
-        goal_ok = False
-    return goal_ok
-
 
 class GazeboEnv:
     def __init__(self, launchfile, environment_dim):
@@ -61,13 +35,25 @@ class GazeboEnv:
         self.goal_x = 1
         self.goal_y = 0.0
 
-        self.upper = 5.0
-        self.lower = -5.0
+        # --- STAGE 1 SETTINGS: VIRTUAL CAGE ---
+        # We start with a 2.0m "Invisible Box" in the empty world.
+        # This prevents the robot from driving to infinity and forces it to turn.
+        self.boundary_limit = 2.0 
+        self.success_count = 0  # To track curriculum progress
+
+        self.upper = self.boundary_limit
+        self.lower = -self.boundary_limit
+        
         self.velodyne_data = np.ones(self.environment_dim) * MAX_TRAINING_RANGE
         self.last_odom = None
+        
+        # Reward Shaping Variables
+        self.last_distance = 0.0 
+        self.idle_counter = 0
 
+        # ROS Initialization
         self.set_self_state = ModelState()
-        self.set_self_state.model_name = "r1"
+        self.set_self_state.model_name = "turtlebot3_burger"
         self.set_self_state.pose.position.x = 0.0
         self.set_self_state.pose.position.y = 0.0
         self.set_self_state.pose.position.z = 0.0
@@ -76,29 +62,24 @@ class GazeboEnv:
         self.set_self_state.pose.orientation.z = 0.0
         self.set_self_state.pose.orientation.w = 1.0
 
-        self.gaps = [[-np.pi / 2 - 0.03, -np.pi / 2 + np.pi / self.environment_dim]]
-        for m in range(self.environment_dim - 1):
-            self.gaps.append(
-                [self.gaps[m][1], self.gaps[m][1] + np.pi / self.environment_dim]
-            )
-        self.gaps[-1][-1] += 0.03
-
         port = "11311"
         subprocess.Popen(["roscore", "-p", port])
         print("Roscore launched!")
 
         rospy.init_node("gym", anonymous=True)
+        
         if launchfile.startswith("/"):
             fullpath = launchfile
         else:
-            fullpath = os.path.join(os.path.dirname(__file__), "assets", launchfile)
+            fullpath = "/home/harry/workspaces/td_ws/DRL-robot-navigation/catkin_ws/src/multi_robot_scenario/launch/" + launchfile
+
         if not path.exists(fullpath):
             raise IOError("File " + fullpath + " does not exist")
 
         subprocess.Popen(["roslaunch", "-p", port, fullpath])
         print("Gazebo launched!")
 
-        self.vel_pub = rospy.Publisher("/r1/cmd_vel", Twist, queue_size=1)
+        self.vel_pub = rospy.Publisher("/turtlebot3_burger/cmd_vel", Twist, queue_size=1)
         self.set_state = rospy.Publisher("gazebo/set_model_state", ModelState, queue_size=10)
         self.unpause = rospy.ServiceProxy("/gazebo/unpause_physics", Empty)
         self.pause = rospy.ServiceProxy("/gazebo/pause_physics", Empty)
@@ -107,11 +88,17 @@ class GazeboEnv:
         self.publisher2 = rospy.Publisher("linear_velocity", MarkerArray, queue_size=1)
         self.publisher3 = rospy.Publisher("angular_velocity", MarkerArray, queue_size=1)
         
-        # CHANGED: Subscribe to /scan
         self.velodyne = rospy.Subscriber("/scan", LaserScan, self.velodyne_callback, queue_size=1)
-        self.odom = rospy.Subscriber("/r1/odom", Odometry, self.odom_callback, queue_size=1)
+        self.odom = rospy.Subscriber("/turtlebot3_burger/odom", Odometry, self.odom_callback, queue_size=1)
 
-    # UPDATED CALLBACK
+    def check_pos(self, x, y):
+        goal_ok = True
+        # Dynamic check using current boundary_limit
+        if x > self.boundary_limit or x < -self.boundary_limit or \
+           y > self.boundary_limit or y < -self.boundary_limit:
+            goal_ok = False
+        return goal_ok
+
     def velodyne_callback(self, msg):
         raw_ranges = np.array(msg.ranges)
         raw_ranges[np.isinf(raw_ranges)] = REAL_SENSOR_MAX
@@ -137,12 +124,14 @@ class GazeboEnv:
     def step(self, action):
         target = False
 
+        # 1. Execute Action
         vel_cmd = Twist()
-        vel_cmd.linear.x = action[0]
+        vel_cmd.linear.x = action[0] * 0.5 
         vel_cmd.angular.z = action[1]
         self.vel_pub.publish(vel_cmd)
         self.publish_markers(action)
 
+        # 2. Physics Step
         rospy.wait_for_service("/gazebo/unpause_physics")
         try:
             self.unpause()
@@ -152,7 +141,8 @@ class GazeboEnv:
         time.sleep(TIME_DELTA)
 
         if self.last_odom is None:
-            return [0] * (self.environment_dim + 4), 0, False, False
+            # Return dummy state size 26 (20 laser + 6 robot state)
+            return [0] * (self.environment_dim + 6), 0, False, False
 
         rospy.wait_for_service("/gazebo/pause_physics")
         try:
@@ -160,7 +150,17 @@ class GazeboEnv:
         except (rospy.ServiceException) as e:
             print("/gazebo/pause_physics service call failed")
 
+        # 3. Collision / Boundary Check
         done, collision, min_laser = self.observe_collision(self.velodyne_data)
+        
+        # Kill if outside the "Invisible Cage"
+        if self.odom_x > self.boundary_limit or self.odom_x < -self.boundary_limit or \
+           self.odom_y > self.boundary_limit or self.odom_y < -self.boundary_limit:
+            done = True
+            collision = True 
+            print(f"OUT OF BOUNDS ({self.boundary_limit}m)! Resetting...")
+
+        # 4. State Construction
         v_state = []
         v_state[:] = self.velodyne_data[:]
         laser_state = [v_state]
@@ -180,6 +180,18 @@ class GazeboEnv:
             [self.odom_x - self.goal_x, self.odom_y - self.goal_y]
         )
 
+        # Idle Check (Prevent Spinning)
+        if action[0] < 0.05:
+            self.idle_counter += 1
+        else:
+            self.idle_counter = 0
+            
+        if self.idle_counter > 20: 
+            print("LAZY ROBOT! Killing episode...")
+            done = True
+            collision = True 
+
+        # Angle Calculation
         skew_x = self.goal_x - self.odom_x
         skew_y = self.goal_y - self.odom_y
         dot = skew_x * 1 + skew_y * 0
@@ -199,13 +211,30 @@ class GazeboEnv:
             theta = -np.pi - theta
             theta = np.pi - theta
 
+        # 5. Goal Success & Curriculum Learning
         if distance < GOAL_REACHED_DIST:
             target = True
             done = True
+            
+            # AUTOMATIC CURRICULUM: Expand world after 3 wins
+            self.success_count += 1
+            if self.success_count >= 3:
+                self.success_count = 0
+                self.boundary_limit += 0.5
+                print(f"STAGE 1 LEVEL UP! New Boundary: {self.boundary_limit} meters")
 
-        robot_state = [distance, theta, action[0], action[1]]
+        # 6. AUGMENTED STATE: Add current velocity
+        current_vel_x = self.last_odom.twist.twist.linear.x
+        current_vel_w = self.last_odom.twist.twist.angular.z
+        
+        # State = [Laser(20)] + [Dist, Angle, ActionLinear, ActionAngular, VelLinear, VelAngular]
+        robot_state = [distance, theta, action[0], action[1], current_vel_x, current_vel_w]
         state = np.append(laser_state, robot_state)
-        reward = self.get_reward(target, collision, action, min_laser)
+        
+        # 7. Dense Reward
+        reward = self.get_reward(target, collision, action, min_laser, distance, self.last_distance)
+        self.last_distance = distance 
+        
         return state, reward, done, target
 
     def reset(self):
@@ -223,9 +252,10 @@ class GazeboEnv:
         y = 0
         position_ok = False
         while not position_ok:
-            x = np.random.uniform(-4.5, 4.5)
-            y = np.random.uniform(-4.5, 4.5)
-            position_ok = check_pos(x, y)
+            # Spawn random within CURRENT boundary
+            x = np.random.uniform(-self.boundary_limit + 0.5, self.boundary_limit - 0.5)
+            y = np.random.uniform(-self.boundary_limit + 0.5, self.boundary_limit - 0.5)
+            position_ok = self.check_pos(x, y)
         object_state.pose.position.x = x
         object_state.pose.position.y = y
         object_state.pose.orientation.x = quaternion.x
@@ -254,6 +284,7 @@ class GazeboEnv:
             self.pause()
         except (rospy.ServiceException) as e:
             print("/gazebo/pause_physics service call failed")
+        
         v_state = []
         v_state[:] = self.velodyne_data[:]
         laser_state = [v_state]
@@ -261,22 +292,21 @@ class GazeboEnv:
         distance = np.linalg.norm(
             [self.odom_x - self.goal_x, self.odom_y - self.goal_y]
         )
+        self.last_distance = distance 
 
+        # Recalculate Angle for Reset State
         skew_x = self.goal_x - self.odom_x
         skew_y = self.goal_y - self.odom_y
-
         dot = skew_x * 1 + skew_y * 0
         mag1 = math.sqrt(math.pow(skew_x, 2) + math.pow(skew_y, 2))
         mag2 = math.sqrt(math.pow(1, 2) + math.pow(0, 2))
         beta = math.acos(dot / (mag1 * mag2))
-
         if skew_y < 0:
             if skew_x < 0:
                 beta = -beta
             else:
                 beta = 0 - beta
         theta = beta - angle
-
         if theta > np.pi:
             theta = np.pi - theta
             theta = -np.pi - theta
@@ -284,46 +314,24 @@ class GazeboEnv:
             theta = -np.pi - theta
             theta = np.pi - theta
 
-        robot_state = [distance, theta, 0.0, 0.0]
+        # Initial State (Zeros for actions and velocity)
+        robot_state = [distance, theta, 0.0, 0.0, 0.0, 0.0]
         state = np.append(laser_state, robot_state)
         return state
 
     def change_goal(self):
-        if self.upper < 10:
-            self.upper += 0.004
-        if self.lower > -10:
-            self.lower -= 0.004
+        # Goal must also be inside dynamic boundary
+        self.upper = self.boundary_limit
+        self.lower = -self.boundary_limit
 
         goal_ok = False
         while not goal_ok:
             self.goal_x = self.odom_x + random.uniform(self.upper, self.lower)
             self.goal_y = self.odom_y + random.uniform(self.upper, self.lower)
-            goal_ok = check_pos(self.goal_x, self.goal_y)
+            goal_ok = self.check_pos(self.goal_x, self.goal_y)
 
     def random_box(self):
-        for i in range(4):
-            name = "cardboard_box_" + str(i)
-            x = 0
-            y = 0
-            box_ok = False
-            while not box_ok:
-                x = np.random.uniform(-6, 6)
-                y = np.random.uniform(-6, 6)
-                box_ok = check_pos(x, y)
-                distance_to_robot = np.linalg.norm([x - self.odom_x, y - self.odom_y])
-                distance_to_goal = np.linalg.norm([x - self.goal_x, y - self.goal_y])
-                if distance_to_robot < 1.5 or distance_to_goal < 1.5:
-                    box_ok = False
-            box_state = ModelState()
-            box_state.model_name = name
-            box_state.pose.position.x = x
-            box_state.pose.position.y = y
-            box_state.pose.position.z = 0.0
-            box_state.pose.orientation.x = 0.0
-            box_state.pose.orientation.y = 0.0
-            box_state.pose.orientation.z = 0.0
-            box_state.pose.orientation.w = 1.0
-            self.set_state.publish(box_state)
+        pass
 
     def publish_markers(self, action):
         markerArray = MarkerArray()
@@ -345,44 +353,6 @@ class GazeboEnv:
         markerArray.markers.append(marker)
         self.publisher.publish(markerArray)
 
-        markerArray2 = MarkerArray()
-        marker2 = Marker()
-        marker2.header.frame_id = "odom"
-        marker2.type = marker.CUBE
-        marker2.action = marker.ADD
-        marker2.scale.x = abs(action[0])
-        marker2.scale.y = 0.1
-        marker2.scale.z = 0.01
-        marker2.color.a = 1.0
-        marker2.color.r = 1.0
-        marker2.color.g = 0.0
-        marker2.color.b = 0.0
-        marker2.pose.orientation.w = 1.0
-        marker2.pose.position.x = 5
-        marker2.pose.position.y = 0
-        marker2.pose.position.z = 0
-        markerArray2.markers.append(marker2)
-        self.publisher2.publish(markerArray2)
-
-        markerArray3 = MarkerArray()
-        marker3 = Marker()
-        marker3.header.frame_id = "odom"
-        marker3.type = marker.CUBE
-        marker3.action = marker.ADD
-        marker3.scale.x = abs(action[1])
-        marker3.scale.y = 0.1
-        marker3.scale.z = 0.01
-        marker3.color.a = 1.0
-        marker3.color.r = 1.0
-        marker3.color.g = 0.0
-        marker3.color.b = 0.0
-        marker3.pose.orientation.w = 1.0
-        marker3.pose.position.x = 5
-        marker3.pose.position.y = 0.2
-        marker3.pose.position.z = 0
-        markerArray3.markers.append(marker3)
-        self.publisher3.publish(markerArray3)
-
     @staticmethod
     def observe_collision(laser_data):
         min_laser = min(laser_data)
@@ -391,13 +361,14 @@ class GazeboEnv:
         return False, False, min_laser
 
     @staticmethod
-    def get_reward(target, collision, action, min_laser):
+    def get_reward(target, collision, action, min_laser, distance, last_distance):
         if target:
-            return 100.0
+            return 200.0
         elif collision:
             return -100.0
         else:
-            r3 = lambda x: 1 - x if x < 1 else 0.0
-            # Change 1: Reward forward speed (action[0]) much more (was /2, now *2)
-            # Change 2: Punish spinning (action[1]) much more (was /2, now *1)
-            return action[0] * 2.0 - abs(action[1]) * 1.0 - r3(min_laser) / 2
+            # Hot/Cold Dense Reward
+            distance_rate = last_distance - distance
+            reward = distance_rate * 400.0 
+            reward -= 0.05
+            return reward
