@@ -1,45 +1,63 @@
-Deep Reinforcement Learning (TD3) for Robot Navigation
-This project trains a Turtlebot3 robot to navigate a custom environment using the Twin Delayed Deep Deterministic Policy Gradient (TD3) algorithm. The robot learns to reach a target goal while avoiding obstacles using LaserScan (LIDAR) data.
-
 Prerequisites
-ROS Noetic
 
-Python 3.8+
+OS: Ubuntu 20.04 (Focal)
 
-PyTorch
+ROS Distro: Noetic
 
-Gazebo & Turtlebot3 Simulations
+Simulation: Gazebo
 
-Configuration
-Before running, ensure your .bashrc is configured correctly:
+Python: 3.8+ (PyTorch, NumPy)
 
-Bash
+Setup
 
-export TURTLEBOT3_MODEL=burger
-source /opt/ros/noetic/setup.bash
-source ~/workspaces/td_ws/DRL-robot-navigation/catkin_ws/devel/setup.bash
-🚀 How to Train
-To start training the robot from scratch or resume training:
+Create a workspace mkdir -p ~/catkin_ws/src cd ~/catkin_ws/src
 
-Open the training script: train_velodyne_td3.py
+Clone the repository git clone https://github.com/harisharandangi/DRL-robot-navigation.git
 
-Select your mode:
+Install Python dependencies pip3 install torch torchvision numpy
 
-Start Fresh: Set load_model = False (Line ~173).
+Build workspace cd ~/catkin_ws catkin_make source devel/setup.bash
 
-Resume Training: Set load_model = True.
+Training Pipeline
 
-Select your Map:
+This project uses a sequential "Zero-to-Hero" training strategy to accelerate learning.
 
-In train_velodyne_td3.py, set the launch file:
+Stage 1: Kinematics Pre-Training (Empty World) Goal: Train the agent to master velocity control and goal-seeking behavior without physical obstacles. Method: Uses a "Virtual Cage" (software boundary) in an infinite empty world to enforce steering constraints.
 
-Python
+Commands:
 
-env = GazeboEnv("mylaunch.launch", environment_dim) # Custom Map
-# OR
-env = GazeboEnv("empty_training.launch", environment_dim) # Empty World
-Run the command:
+Terminal 1: Launch Empty Environment
+roslaunch multi_robot_scenario empty_training.launch
 
-Bash
+Terminal 2: Start Stage 1 Training
+python3 train_lds_empty_world.py
 
-python3 train_velodyne_td3.py
+Output: Weights saved to pytorch_models/TD3_lds_empty_actor.pth
+
+Stage 2 & 3: Obstacle Avoidance (Cluttered World) Goal: Train the agent to avoid collisions while maintaining speed. Method: Loads Stage 1 weights. Starts with a tight 1.0m boundary. Automatically expands the boundary (Curriculum Learning) as the agent logs successful episodes.
+
+Commands:
+
+Terminal 1: Launch Cluttered Environment
+roslaunch multi_robot_scenario mylaunch.launch
+
+Terminal 2: Start Stage 2/3 Training
+python3 train_lds_cluttered.py
+
+Note: This script automatically looks for Stage 1 weights if Stage 2 weights do not exist.
+
+Deployment (Global Planner)
+
+The deployment script implements a hierarchical architecture. A rule-based Global Planner calculates intermediate waypoints, while the trained TD3 Pilot handles local navigation to those waypoints.
+
+Commands:
+
+1. Launch Simulation
+roslaunch multi_robot_scenario mylaunch.launch
+
+2. Run the Deployment Node
+python3 deploy_lds_global.py
+
+Usage: Once the node is running, enter target coordinates in the terminal when prompted:
+
+Enter Global Goal X: 4.0 Enter Global Goal Y: 0.0
